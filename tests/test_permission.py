@@ -1,16 +1,29 @@
-from typing import Tuple, Optional
+from typing import Optional
 
-import pytest
 from nonebug import App
+import pytest
 
+from nonebot.exception import SkippedException
+from nonebot.permission import (
+    MESSAGE,
+    METAEVENT,
+    NOTICE,
+    REQUEST,
+    SUPERUSER,
+    USER,
+    Message,
+    MetaEvent,
+    Notice,
+    Permission,
+    Request,
+    SuperUser,
+    User,
+)
 from utils import make_fake_event
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_permission(app: App):
-    from nonebot.permission import Permission
-    from nonebot.exception import SkippedException
-
     async def falsy():
         return False
 
@@ -34,29 +47,17 @@ async def test_permission(app: App):
 
     async with app.test_api() as ctx:
         bot = ctx.create_bot()
-        assert await Permission(falsy)(bot, event) == False
-        assert await Permission(truthy)(bot, event) == True
-        assert await Permission(skipped)(bot, event) == False
-        assert await Permission(truthy, falsy)(bot, event) == True
-        assert await Permission(truthy, skipped)(bot, event) == True
+        assert await Permission(falsy)(bot, event) is False
+        assert await Permission(truthy)(bot, event) is True
+        assert await Permission(skipped)(bot, event) is False
+        assert await Permission(truthy, falsy)(bot, event) is True
+        assert await Permission(truthy, skipped)(bot, event) is True
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "type,expected",
-    [
-        ("message", True),
-        ("notice", False),
-    ],
-)
-async def test_message(
-    app: App,
-    type: str,
-    expected: bool,
-):
-    from nonebot.permission import MESSAGE, Message
-
-    dependent = list(MESSAGE.checkers)[0]
+@pytest.mark.anyio
+@pytest.mark.parametrize(("type", "expected"), [("message", True), ("notice", False)])
+async def test_message(type: str, expected: bool):
+    dependent = next(iter(MESSAGE.checkers))
     checker = dependent.call
 
     assert isinstance(checker, Message)
@@ -65,22 +66,10 @@ async def test_message(
     assert await dependent(event=event) == expected
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "type,expected",
-    [
-        ("message", False),
-        ("notice", True),
-    ],
-)
-async def test_notice(
-    app: App,
-    type: str,
-    expected: bool,
-):
-    from nonebot.permission import NOTICE, Notice
-
-    dependent = list(NOTICE.checkers)[0]
+@pytest.mark.anyio
+@pytest.mark.parametrize(("type", "expected"), [("message", False), ("notice", True)])
+async def test_notice(type: str, expected: bool):
+    dependent = next(iter(NOTICE.checkers))
     checker = dependent.call
 
     assert isinstance(checker, Notice)
@@ -89,22 +78,10 @@ async def test_notice(
     assert await dependent(event=event) == expected
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "type,expected",
-    [
-        ("message", False),
-        ("request", True),
-    ],
-)
-async def test_request(
-    app: App,
-    type: str,
-    expected: bool,
-):
-    from nonebot.permission import REQUEST, Request
-
-    dependent = list(REQUEST.checkers)[0]
+@pytest.mark.anyio
+@pytest.mark.parametrize(("type", "expected"), [("message", False), ("request", True)])
+async def test_request(type: str, expected: bool):
+    dependent = next(iter(REQUEST.checkers))
     checker = dependent.call
 
     assert isinstance(checker, Request)
@@ -113,22 +90,12 @@ async def test_request(
     assert await dependent(event=event) == expected
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
-    "type,expected",
-    [
-        ("message", False),
-        ("meta_event", True),
-    ],
+    ("type", "expected"), [("message", False), ("meta_event", True)]
 )
-async def test_metaevent(
-    app: App,
-    type: str,
-    expected: bool,
-):
-    from nonebot.permission import METAEVENT, MetaEvent
-
-    dependent = list(METAEVENT.checkers)[0]
+async def test_metaevent(type: str, expected: bool):
+    dependent = next(iter(METAEVENT.checkers))
     checker = dependent.call
 
     assert isinstance(checker, MetaEvent)
@@ -137,9 +104,9 @@ async def test_metaevent(
     assert await dependent(event=event) == expected
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
-    "type,user_id,expected",
+    ("type", "user_id", "expected"),
     [
         ("message", "test", True),
         ("message", "foo", False),
@@ -148,15 +115,8 @@ async def test_metaevent(
         ("notice", "test", True),
     ],
 )
-async def test_superuser(
-    app: App,
-    type: str,
-    user_id: str,
-    expected: bool,
-):
-    from nonebot.permission import SUPERUSER, SuperUser
-
-    dependent = list(SUPERUSER.checkers)[0]
+async def test_superuser(app: App, type: str, user_id: str, expected: bool):
+    dependent = next(iter(SUPERUSER.checkers))
     checker = dependent.call
 
     assert isinstance(checker, SuperUser)
@@ -168,9 +128,9 @@ async def test_superuser(
         assert await dependent(bot=bot, event=event) == expected
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
-    "session_ids,session_id,expected",
+    ("session_ids", "session_id", "expected"),
     [
         (("user", "foo"), "user", True),
         (("user", "foo"), "bar", False),
@@ -178,11 +138,9 @@ async def test_superuser(
     ],
 )
 async def test_user(
-    app: App, session_ids: Tuple[str, ...], session_id: Optional[str], expected: bool
+    app: App, session_ids: tuple[str, ...], session_id: Optional[str], expected: bool
 ):
-    from nonebot.permission import USER, User
-
-    dependent = list(USER(*session_ids).checkers)[0]
+    dependent = next(iter(USER(*session_ids).checkers))
     checker = dependent.call
 
     assert isinstance(checker, User)
