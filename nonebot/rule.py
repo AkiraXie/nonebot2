@@ -1,32 +1,33 @@
 """本模块是 {ref}`nonebot.matcher.Matcher.rule` 的类型定义。
 
-每个事件响应器 {ref}`nonebot.matcher.Matcher` 拥有一个匹配规则 {ref}`nonebot.rule.Rule`
-其中是 `RuleChecker` 的集合，只有当所有 `RuleChecker` 检查结果为 `True` 时继续运行。
+每个{ref}`事件响应器 <nonebot.matcher.Matcher>`拥有一个
+{ref}`nonebot.rule.Rule`，其中是 `RuleChecker` 的集合。
+只有当所有 `RuleChecker` 检查结果为 `True` 时继续运行。
 
 FrontMatter:
+    mdx:
+        format: md
     sidebar_position: 5
     description: nonebot.rule 模块
 """
 
+from argparse import Action, ArgumentError
+from argparse import ArgumentParser as ArgParser
+from argparse import Namespace as Namespace
+from collections.abc import Sequence
+from contextvars import ContextVar
+from gettext import gettext
+from itertools import chain, product
 import re
 import shlex
-from argparse import Action
-from argparse import ArgumentError
-from itertools import chain, product
-from argparse import Namespace as Namespace
-from argparse import ArgumentParser as ArgParser
 from typing import (
     IO,
     TYPE_CHECKING,
-    List,
-    Type,
-    Tuple,
-    Union,
-    TypeVar,
-    Optional,
-    Sequence,
-    TypedDict,
     NamedTuple,
+    Optional,
+    TypedDict,
+    TypeVar,
+    Union,
     cast,
     overload,
 )
@@ -34,44 +35,45 @@ from typing import (
 from pygtrie import CharTrie
 
 from nonebot import get_driver
-from nonebot.log import logger
-from nonebot.typing import T_State
-from nonebot.exception import ParserExit
-from nonebot.internal.rule import Rule as Rule
-from nonebot.params import Command, EventToMe, CommandArg
 from nonebot.adapters import Bot, Event, Message, MessageSegment
 from nonebot.consts import (
+    CMD_ARG_KEY,
     CMD_KEY,
+    CMD_START_KEY,
+    CMD_WHITESPACE_KEY,
+    ENDSWITH_KEY,
+    FULLMATCH_KEY,
+    KEYWORD_KEY,
     PREFIX_KEY,
-    REGEX_DICT,
+    RAW_CMD_KEY,
+    REGEX_MATCHED,
     SHELL_ARGS,
     SHELL_ARGV,
-    CMD_ARG_KEY,
-    KEYWORD_KEY,
-    RAW_CMD_KEY,
-    REGEX_GROUP,
-    ENDSWITH_KEY,
-    CMD_START_KEY,
-    FULLMATCH_KEY,
-    REGEX_MATCHED,
     STARTSWITH_KEY,
 )
+from nonebot.exception import ParserExit
+from nonebot.internal.rule import Rule as Rule
+from nonebot.log import logger
+from nonebot.params import Command, CommandArg, CommandWhitespace, EventToMe
+from nonebot.typing import T_State
 
 T = TypeVar("T")
 
-CMD_RESULT = TypedDict(
-    "CMD_RESULT",
-    {
-        "command": Optional[Tuple[str, ...]],
-        "raw_command": Optional[str],
-        "command_arg": Optional[Message[MessageSegment]],
-        "command_start": Optional[str],
-    },
-)
 
-TRIE_VALUE = NamedTuple(
-    "TRIE_VALUE", [("command_start", str), ("command", Tuple[str, ...])]
-)
+class CMD_RESULT(TypedDict):
+    command: Optional[tuple[str, ...]]
+    raw_command: Optional[str]
+    command_arg: Optional[Message]
+    command_start: Optional[str]
+    command_whitespace: Optional[str]
+
+
+class TRIE_VALUE(NamedTuple):
+    command_start: str
+    command: tuple[str, ...]
+
+
+parser_message: ContextVar[str] = ContextVar("parser_message")
 
 
 class TrieRule:
@@ -87,7 +89,11 @@ class TrieRule:
     @classmethod
     def get_value(cls, bot: Bot, event: Event, state: T_State) -> CMD_RESULT:
         prefix = CMD_RESULT(
-            command=None, raw_command=None, command_arg=None, command_start=None
+            command=None,
+            raw_command=None,
+            command_arg=None,
+            command_start=None,
+            command_whitespace=None,
         )
         state[PREFIX_KEY] = prefix
         if event.get_type() != "message":
@@ -102,11 +108,30 @@ class TrieRule:
                 prefix[RAW_CMD_KEY] = pf.key
                 prefix[CMD_START_KEY] = value.command_start
                 prefix[CMD_KEY] = value.command
+
                 msg = message.copy()
                 msg.pop(0)
-                new_message = msg.__class__(segment_text[len(pf.key) :].lstrip())
-                for new_segment in reversed(new_message):
-                    msg.insert(0, new_segment)
+
+                # check whitespace
+                arg_str = segment_text[len(pf.key) :]
+                arg_str_stripped = arg_str.lstrip()
+                # check next segment until arg detected or no text remain
+                while not arg_str_stripped and msg and msg[0].is_text():
+                    arg_str += str(msg.pop(0))
+                    arg_str_stripped = arg_str.lstrip()
+
+                has_arg = arg_str_stripped or msg
+                if (
+                    has_arg
+                    and (stripped_len := len(arg_str) - len(arg_str_stripped)) > 0
+                ):
+                    prefix[CMD_WHITESPACE_KEY] = arg_str[:stripped_len]
+
+                # construct command arg
+                if arg_str_stripped:
+                    new_message = msg.__class__(arg_str_stripped)
+                    for new_segment in reversed(new_message):
+                        msg.insert(0, new_segment)
                 prefix[CMD_ARG_KEY] = msg
 
         return prefix
@@ -120,9 +145,9 @@ class StartswithRule:
         ignorecase: 是否忽略大小写
     """
 
-    __slots__ = ("msg", "ignorecase")
+    __slots__ = ("ignorecase", "msg")
 
-    def __init__(self, msg: Tuple[str, ...], ignorecase: bool = False):
+    def __init__(self, msg: tuple[str, ...], ignorecase: bool = False):
         self.msg = msg
         self.ignorecase = ignorecase
 
@@ -140,8 +165,6 @@ class StartswithRule:
         return hash((frozenset(self.msg), self.ignorecase))
 
     async def __call__(self, event: Event, state: T_State) -> bool:
-        if event.get_type() != "message":
-            return False
         try:
             text = event.get_plaintext()
         except Exception:
@@ -156,7 +179,7 @@ class StartswithRule:
         return False
 
 
-def startswith(msg: Union[str, Tuple[str, ...]], ignorecase: bool = False) -> Rule:
+def startswith(msg: Union[str, tuple[str, ...]], ignorecase: bool = False) -> Rule:
     """匹配消息纯文本开头。
 
     参数:
@@ -177,9 +200,9 @@ class EndswithRule:
         ignorecase: 是否忽略大小写
     """
 
-    __slots__ = ("msg", "ignorecase")
+    __slots__ = ("ignorecase", "msg")
 
-    def __init__(self, msg: Tuple[str, ...], ignorecase: bool = False):
+    def __init__(self, msg: tuple[str, ...], ignorecase: bool = False):
         self.msg = msg
         self.ignorecase = ignorecase
 
@@ -197,8 +220,6 @@ class EndswithRule:
         return hash((frozenset(self.msg), self.ignorecase))
 
     async def __call__(self, event: Event, state: T_State) -> bool:
-        if event.get_type() != "message":
-            return False
         try:
             text = event.get_plaintext()
         except Exception:
@@ -213,7 +234,7 @@ class EndswithRule:
         return False
 
 
-def endswith(msg: Union[str, Tuple[str, ...]], ignorecase: bool = False) -> Rule:
+def endswith(msg: Union[str, tuple[str, ...]], ignorecase: bool = False) -> Rule:
     """匹配消息纯文本结尾。
 
     参数:
@@ -234,9 +255,9 @@ class FullmatchRule:
         ignorecase: 是否忽略大小写
     """
 
-    __slots__ = ("msg", "ignorecase")
+    __slots__ = ("ignorecase", "msg")
 
-    def __init__(self, msg: Tuple[str, ...], ignorecase: bool = False):
+    def __init__(self, msg: tuple[str, ...], ignorecase: bool = False):
         self.msg = tuple(map(str.casefold, msg) if ignorecase else msg)
         self.ignorecase = ignorecase
 
@@ -254,8 +275,6 @@ class FullmatchRule:
         return hash((frozenset(self.msg), self.ignorecase))
 
     async def __call__(self, event: Event, state: T_State) -> bool:
-        if event.get_type() != "message":
-            return False
         try:
             text = event.get_plaintext()
         except Exception:
@@ -269,7 +288,7 @@ class FullmatchRule:
         return False
 
 
-def fullmatch(msg: Union[str, Tuple[str, ...]], ignorecase: bool = False) -> Rule:
+def fullmatch(msg: Union[str, tuple[str, ...]], ignorecase: bool = False) -> Rule:
     """完全匹配消息。
 
     参数:
@@ -306,8 +325,6 @@ class KeywordsRule:
         return hash(frozenset(self.keywords))
 
     async def __call__(self, event: Event, state: T_State) -> bool:
-        if event.get_type() != "message":
-            return False
         try:
             text = event.get_plaintext()
         except Exception:
@@ -335,12 +352,18 @@ class CommandRule:
 
     参数:
         cmds: 指定命令元组列表
+        force_whitespace: 是否强制命令后必须有指定空白符
     """
 
-    __slots__ = ("cmds",)
+    __slots__ = ("cmds", "force_whitespace")
 
-    def __init__(self, cmds: List[Tuple[str, ...]]):
+    def __init__(
+        self,
+        cmds: list[tuple[str, ...]],
+        force_whitespace: Optional[Union[str, bool]] = None,
+    ):
         self.cmds = tuple(cmds)
+        self.force_whitespace = force_whitespace
 
     def __repr__(self) -> str:
         return f"Command(cmds={self.cmds})"
@@ -353,11 +376,25 @@ class CommandRule:
     def __hash__(self) -> int:
         return hash((frozenset(self.cmds),))
 
-    async def __call__(self, cmd: Optional[Tuple[str, ...]] = Command()) -> bool:
-        return cmd in self.cmds
+    async def __call__(
+        self,
+        cmd: Optional[tuple[str, ...]] = Command(),
+        cmd_arg: Optional[Message] = CommandArg(),
+        cmd_whitespace: Optional[str] = CommandWhitespace(),
+    ) -> bool:
+        if cmd not in self.cmds:
+            return False
+        if self.force_whitespace is None or not cmd_arg:
+            return True
+        if isinstance(self.force_whitespace, str):
+            return self.force_whitespace == cmd_whitespace
+        return self.force_whitespace == (cmd_whitespace is not None)
 
 
-def command(*cmds: Union[str, Tuple[str, ...]]) -> Rule:
+def command(
+    *cmds: Union[str, tuple[str, ...]],
+    force_whitespace: Optional[Union[str, bool]] = None,
+) -> Rule:
     """匹配消息命令。
 
     根据配置里提供的 {ref}``command_start` <nonebot.config.Config.command_start>`,
@@ -369,9 +406,10 @@ def command(*cmds: Union[str, Tuple[str, ...]]) -> Rule:
 
     参数:
         cmds: 命令文本或命令元组
+        force_whitespace: 是否强制命令后必须有指定空白符
 
     用法:
-        使用默认 `command_start`, `command_sep` 配置
+        使用默认 `command_start`, `command_sep` 配置情况下：
 
         命令 `("test",)` 可以匹配: `/test` 开头的消息
         命令 `("test", "sub")` 可以匹配: `/test.sub` 开头的消息
@@ -384,7 +422,7 @@ def command(*cmds: Union[str, Tuple[str, ...]]) -> Rule:
     config = get_driver().config
     command_start = config.command_start
     command_sep = config.command_sep
-    commands: List[Tuple[str, ...]] = []
+    commands: list[tuple[str, ...]] = []
     for command in cmds:
         if isinstance(command, str):
             command = (command,)
@@ -400,11 +438,13 @@ def command(*cmds: Union[str, Tuple[str, ...]]) -> Rule:
                     f"{start}{sep.join(command)}", TRIE_VALUE(start, command)
                 )
 
-    return Rule(CommandRule(commands))
+    return Rule(CommandRule(commands, force_whitespace))
 
 
 class ArgumentParser(ArgParser):
     """`shell_like` 命令参数解析器，解析出错时不会退出程序。
+
+    支持 {ref}`nonebot.adapters.Message` 富文本解析。
 
     用法:
         用法与 `argparse.ArgumentParser` 相同，
@@ -414,45 +454,71 @@ class ArgumentParser(ArgParser):
     if TYPE_CHECKING:
 
         @overload
-        def parse_args(
-            self, args: Optional[Sequence[Union[str, MessageSegment]]] = ...
-        ) -> Namespace:
-            ...
+        def parse_known_args(
+            self,
+            args: Optional[Sequence[Union[str, MessageSegment]]] = None,
+            namespace: None = None,
+        ) -> tuple[Namespace, list[Union[str, MessageSegment]]]: ...
 
         @overload
-        def parse_args(
-            self, args: Optional[Sequence[Union[str, MessageSegment]]], namespace: None
-        ) -> Namespace:
-            ...  # type: ignore[misc]
-
-        @overload
-        def parse_args(
+        def parse_known_args(
             self, args: Optional[Sequence[Union[str, MessageSegment]]], namespace: T
-        ) -> T:
-            ...
+        ) -> tuple[T, list[Union[str, MessageSegment]]]: ...
 
-        def parse_args(
+        @overload
+        def parse_known_args(
+            self, *, namespace: T
+        ) -> tuple[T, list[Union[str, MessageSegment]]]: ...
+
+        def parse_known_args(  # pyright: ignore[reportIncompatibleMethodOverride]
             self,
             args: Optional[Sequence[Union[str, MessageSegment]]] = None,
             namespace: Optional[T] = None,
-        ) -> Union[Namespace, T]:
-            ...
+        ) -> tuple[Union[Namespace, T], list[Union[str, MessageSegment]]]: ...
+
+    @overload
+    def parse_args(
+        self,
+        args: Optional[Sequence[Union[str, MessageSegment]]] = None,
+        namespace: None = None,
+    ) -> Namespace: ...
+
+    @overload
+    def parse_args(
+        self, args: Optional[Sequence[Union[str, MessageSegment]]], namespace: T
+    ) -> T: ...
+
+    @overload
+    def parse_args(self, *, namespace: T) -> T: ...
+
+    def parse_args(
+        self,
+        args: Optional[Sequence[Union[str, MessageSegment]]] = None,
+        namespace: Optional[T] = None,
+    ) -> Union[Namespace, T]:
+        result, argv = self.parse_known_args(args, namespace)
+        if argv:
+            msg = gettext("unrecognized arguments: %s")
+            self.error(msg % " ".join(map(str, argv)))
+        return cast(Union[Namespace, T], result)
 
     def _parse_optional(
         self, arg_string: Union[str, MessageSegment]
-    ) -> Optional[Tuple[Optional[Action], str, Optional[str]]]:
+    ) -> Optional[tuple[Optional[Action], str, Optional[str]]]:
         return (
             super()._parse_optional(arg_string) if isinstance(arg_string, str) else None
         )
 
     def _print_message(self, message: str, file: Optional[IO[str]] = None):
-        if message:
-            setattr(self, "_message", getattr(self, "_message", "") + message)
+        if (msg := parser_message.get(None)) is not None:
+            parser_message.set(msg + message)
+        else:
+            super()._print_message(message, file)
 
     def exit(self, status: int = 0, message: Optional[str] = None):
         if message:
             self._print_message(message)
-        raise ParserExit(status=status, message=getattr(self, "_message", None))
+        raise ParserExit(status=status, message=parser_message.get(None))
 
 
 class ShellCommandRule:
@@ -465,7 +531,7 @@ class ShellCommandRule:
 
     __slots__ = ("cmds", "parser")
 
-    def __init__(self, cmds: List[Tuple[str, ...]], parser: Optional[ArgumentParser]):
+    def __init__(self, cmds: list[tuple[str, ...]], parser: Optional[ArgumentParser]):
         self.cmds = tuple(cmds)
         self.parser = parser
 
@@ -485,20 +551,31 @@ class ShellCommandRule:
     async def __call__(
         self,
         state: T_State,
-        cmd: Optional[Tuple[str, ...]] = Command(),
+        cmd: Optional[tuple[str, ...]] = Command(),
         msg: Optional[Message] = CommandArg(),
     ) -> bool:
         if cmd not in self.cmds or msg is None:
             return False
 
-        state[SHELL_ARGV] = list(
-            chain.from_iterable(
-                shlex.split(str(seg)) if cast(MessageSegment, seg).is_text() else (seg,)
-                for seg in msg
+        try:
+            state[SHELL_ARGV] = list(
+                chain.from_iterable(
+                    shlex.split(str(seg))
+                    if cast(MessageSegment, seg).is_text()
+                    else (seg,)
+                    for seg in msg
+                )
             )
-        )
+        except Exception as e:
+            # set SHELL_ARGV to none indicating shlex error
+            state[SHELL_ARGV] = None
+            # ensure SHELL_ARGS is set to ParserExit if parser is provided
+            if self.parser:
+                state[SHELL_ARGS] = ParserExit(status=2, message=str(e))
+            return True
 
         if self.parser:
+            t = parser_message.set("")
             try:
                 args = self.parser.parse_args(state[SHELL_ARGV])
                 state[SHELL_ARGS] = args
@@ -506,23 +583,29 @@ class ShellCommandRule:
                 state[SHELL_ARGS] = ParserExit(status=2, message=str(e))
             except ParserExit as e:
                 state[SHELL_ARGS] = e
+            finally:
+                parser_message.reset(t)
         return True
 
 
 def shell_command(
-    *cmds: Union[str, Tuple[str, ...]], parser: Optional[ArgumentParser] = None
+    *cmds: Union[str, tuple[str, ...]], parser: Optional[ArgumentParser] = None
 ) -> Rule:
     """匹配 `shell_like` 形式的消息命令。
 
     根据配置里提供的 {ref}``command_start` <nonebot.config.Config.command_start>`,
     {ref}``command_sep` <nonebot.config.Config.command_sep>` 判断消息是否为命令。
 
-    可以通过 {ref}`nonebot.params.Command` 获取匹配成功的命令（例: `("test",)`），
-    通过 {ref}`nonebot.params.RawCommand` 获取匹配成功的原始命令文本（例: `"/test"`），
-    通过 {ref}`nonebot.params.ShellCommandArgv` 获取解析前的参数列表（例: `["arg", "-h"]`），
-    通过 {ref}`nonebot.params.ShellCommandArgs` 获取解析后的参数字典（例: `{"arg": "arg", "h": True}`）。
+    可以通过 {ref}`nonebot.params.Command` 获取匹配成功的命令
+    （例: `("test",)`），
+    通过 {ref}`nonebot.params.RawCommand` 获取匹配成功的原始命令文本
+    （例: `"/test"`），
+    通过 {ref}`nonebot.params.ShellCommandArgv` 获取解析前的参数列表
+    （例: `["arg", "-h"]`），
+    通过 {ref}`nonebot.params.ShellCommandArgs` 获取解析后的参数字典
+    （例: `{"arg": "arg", "h": True}`）。
 
-    :::warning 警告
+    :::caution 警告
     如果参数解析失败，则通过 {ref}`nonebot.params.ShellCommandArgs`
     获取的将是 {ref}`nonebot.exception.ParserExit` 异常。
     :::
@@ -532,7 +615,8 @@ def shell_command(
         parser: {ref}`nonebot.rule.ArgumentParser` 对象
 
     用法:
-        使用默认 `command_start`, `command_sep` 配置，更多示例参考 `argparse` 标准库文档。
+        使用默认 `command_start`, `command_sep` 配置，更多示例参考
+        [argparse](https://docs.python.org/3/library/argparse.html) 标准库文档。
 
         ```python
         from nonebot.rule import ArgumentParser
@@ -553,7 +637,7 @@ def shell_command(
     config = get_driver().config
     command_start = config.command_start
     command_sep = config.command_sep
-    commands: List[Tuple[str, ...]] = []
+    commands: list[tuple[str, ...]] = []
     for command in cmds:
         if isinstance(command, str):
             command = (command,)
@@ -580,7 +664,7 @@ class RegexRule:
         flags: 正则表达式标记
     """
 
-    __slots__ = ("regex", "flags")
+    __slots__ = ("flags", "regex")
 
     def __init__(self, regex: str, flags: int = 0):
         self.regex = regex
@@ -600,16 +684,12 @@ class RegexRule:
         return hash((self.regex, self.flags))
 
     async def __call__(self, event: Event, state: T_State) -> bool:
-        if event.get_type() != "message":
-            return False
         try:
             msg = event.get_message()
         except Exception:
             return False
         if matched := re.search(self.regex, str(msg), self.flags):
-            state[REGEX_MATCHED] = matched.group()
-            state[REGEX_GROUP] = matched.groups()
-            state[REGEX_DICT] = matched.groupdict()
+            state[REGEX_MATCHED] = matched
             return True
         else:
             return False
@@ -618,7 +698,7 @@ class RegexRule:
 def regex(regex: str, flags: Union[int, re.RegexFlag] = 0) -> Rule:
     """匹配符合正则表达式的消息字符串。
 
-    可以通过 {ref}`nonebot.params.RegexMatched` 获取匹配成功的字符串，
+    可以通过 {ref}`nonebot.params.RegexStr` 获取匹配成功的字符串，
     通过 {ref}`nonebot.params.RegexGroup` 获取匹配成功的 group 元组，
     通过 {ref}`nonebot.params.RegexDict` 获取匹配成功的 group 字典。
 
@@ -631,7 +711,8 @@ def regex(regex: str, flags: Union[int, re.RegexFlag] = 0) -> Rule:
     :::
 
     :::tip 提示
-    正则表达式匹配使用 `EventMessage` 的 `str` 字符串，而非 `EventMessage` 的 `PlainText` 纯文本字符串
+    正则表达式匹配使用 `EventMessage` 的 `str` 字符串，
+    而非 `EventMessage` 的 `PlainText` 纯文本字符串
     :::
     """
 
@@ -667,7 +748,7 @@ class IsTypeRule:
 
     __slots__ = ("types",)
 
-    def __init__(self, *types: Type[Event]):
+    def __init__(self, *types: type[Event]):
         self.types = types
 
     def __repr__(self) -> str:
@@ -683,7 +764,7 @@ class IsTypeRule:
         return isinstance(event, self.types)
 
 
-def is_type(*types: Type[Event]) -> Rule:
+def is_type(*types: type[Event]) -> Rule:
     """匹配事件类型。
 
     参数:
