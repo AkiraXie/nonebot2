@@ -1,30 +1,29 @@
-import os
-
+from nonebug import App
 import pytest
 
-os.environ["CONFIG_FROM_ENV"] = '{"test": "test"}'
-os.environ["CONFIG_OVERRIDE"] = "new"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "nonebug_init",
-    [
-        {
-            "config_from_init": "init",
-            "driver": "~fastapi+~httpx+~websockets",
-        },
-        {"config_from_init": "init", "driver": "~fastapi+~aiohttp"},
-    ],
-    indirect=True,
+import nonebot
+from nonebot import (
+    get_adapter,
+    get_adapters,
+    get_app,
+    get_asgi,
+    get_bot,
+    get_bots,
+    get_driver,
 )
-async def test_init(nonebug_init):
-    from nonebot import get_driver
+from nonebot.drivers import ASGIMixin, Driver, ReverseDriver
 
-    env = get_driver().env
+
+def test_init():
+    env = nonebot.get_driver().env
     assert env == "test"
 
-    config = get_driver().config
+    config = nonebot.get_driver().config
+    assert config.nickname == {"test"}
+    assert config.superusers == {"test", "fake:faketest"}
+    assert config.api_timeout is None
+
+    assert config.simple_none is None
     assert config.config_from_env == {"test": "test"}
     assert config.config_override == "new"
     assert config.config_from_init == "init"
@@ -35,37 +34,68 @@ async def test_init(nonebug_init):
     assert config.not_nested == "some string"
 
 
-@pytest.mark.asyncio
-async def test_get(monkeypatch: pytest.MonkeyPatch, nonebug_clear):
-    import nonebot
-    from nonebot.drivers import ForwardDriver, ReverseDriver
-    from nonebot import get_app, get_bot, get_asgi, get_bots, get_driver
+def test_get_driver(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setattr(nonebot, "_driver", None)
+        with pytest.raises(ValueError, match="initialized"):
+            get_driver()
 
-    with pytest.raises(ValueError):
-        get_driver()
 
-    nonebot.init(driver="nonebot.drivers.fastapi")
-
+def test_get_asgi():
     driver = get_driver()
     assert isinstance(driver, ReverseDriver)
+    assert isinstance(driver, ASGIMixin)
     assert get_asgi() == driver.asgi
+
+
+def test_get_app():
+    driver = get_driver()
+    assert isinstance(driver, ReverseDriver)
+    assert isinstance(driver, ASGIMixin)
     assert get_app() == driver.server_app
 
+
+@pytest.mark.anyio
+async def test_get_adapter(app: App, monkeypatch: pytest.MonkeyPatch):
+    async with app.test_api() as ctx:
+        adapter = ctx.create_adapter()
+        adapter_name = adapter.get_name()
+
+        with monkeypatch.context() as m:
+            m.setattr(Driver, "_adapters", {adapter_name: adapter})
+            assert get_adapters() == {adapter_name: adapter}
+            assert get_adapter(adapter_name) is adapter
+            assert get_adapter(adapter.__class__) is adapter
+            with pytest.raises(ValueError, match="registered"):
+                get_adapter("not exist")
+
+
+def test_run(monkeypatch: pytest.MonkeyPatch):
     runned = False
 
     def mock_run(*args, **kwargs):
         nonlocal runned
         runned = True
-        assert args == ("arg",) and kwargs == {"kwarg": "kwarg"}
+        assert args == ("arg",)
+        assert kwargs == {"kwarg": "kwarg"}
 
-    monkeypatch.setattr(driver, "run", mock_run)
-    nonebot.run("arg", kwarg="kwarg")
+    driver = get_driver()
+
+    with monkeypatch.context() as m:
+        m.setattr(driver, "run", mock_run)
+        nonebot.run("arg", kwarg="kwarg")
+
     assert runned
 
-    with pytest.raises(ValueError):
+
+def test_get_bot(app: App, monkeypatch: pytest.MonkeyPatch):
+    driver = get_driver()
+
+    with pytest.raises(ValueError, match="no bots"):
         get_bot()
 
-    monkeypatch.setattr(driver, "_bots", {"test": "test"})
-    assert get_bot() == "test"
-    assert get_bot("test") == "test"
-    assert get_bots() == {"test": "test"}
+    with monkeypatch.context() as m:
+        m.setattr(driver, "_bots", {"test": "test"})
+        assert get_bot() == "test"
+        assert get_bot("test") == "test"
+        assert get_bots() == {"test": "test"}
